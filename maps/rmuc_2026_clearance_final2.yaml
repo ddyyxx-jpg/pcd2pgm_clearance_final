@@ -1,0 +1,7 @@
+image: rmuc_2026_clearance_final2.pgm
+mode: trinary
+resolution: 0.05
+origin: [0.000891, 1.48e-05, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25

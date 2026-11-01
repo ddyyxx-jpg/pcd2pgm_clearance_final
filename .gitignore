@@ -1,0 +1,21 @@
+# data
+data/
+*.pcd
+*.bag
+*.db3
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+
+# ROS
+log/
+*.log
+.ros_log/
+.ros_home/
+
+# system
+.DS_Store
+Thumbs.db

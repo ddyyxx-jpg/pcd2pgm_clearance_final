@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>RMUC2026 栅格地图算法框架</title>
+<style>
+body { font-family: "Microsoft YaHei","PingFang SC",Arial,sans-serif; max-width: 980px; margin: 32px auto; padding: 0 24px; line-height: 1.75; color: #222; }
+h1 { font-size: 30px; border-bottom: 3px solid #2d6cdf; padding-bottom: 10px; color: #1a4fa0; }
+h2 { font-size: 23px; margin-top: 34px; color: #1a4fa0; border-left: 5px solid #2d6cdf; padding-left: 12px; }
+h3 { font-size: 19px; margin-top: 22px; color: #244; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+th, td { border: 1px solid #cfd8e3; padding: 8px 12px; text-align: left; vertical-align: top; }
+th { background: #eaf1fb; }
+code { background: #f3f5f7; padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+pre { background: #f6f8fa; border: 1px solid #e2e6ea; border-radius: 6px; padding: 14px; overflow-x: auto; }
+hr { border: none; border-top: 1px solid #dde3ea; margin: 26px 0; }
+</style></head><body>
+<h1>RMUC2026 栅格地图算法框架与实现思路</h1>
+
+<p>&gt; 版本：最终版 <code>rmuc_2026_clearance_final2.pgm/.yaml</code></p>
+<p>&gt; 输入：<code>rmuc_2026.pcd</code>（100 万点，含法向，x∈[0,28] m，y∈[0,16] m，z∈[0,3.8] m）</p>
+<p>&gt; 输出：<code>nav_msgs/OccupancyGrid</code> 等价的 PGM + YAML（0.05 m/格，560×321，trinary）</p>
+<p>&gt; 特点：<strong>纯点云生成，全程不依赖官方地图</strong>（官方图只用于结果评估）</p>
+
+<hr>
+
+<h2>1. 总体框架</h2>
+
+<pre><code>
+① 输入点云
+   ↓
+② 点云预处理（法向分类 + 剔除底面 + 网格化）
+   ↓
+③ 地面参考估计 z_ground(x,y)（净空法，核心）
+   ↓
+④ 地面归一化 z_norm = z − z_ground
+   ↓
+⑤ 占用栅格构建（pcd2pgm 固定阈值，不改核心）
+   ↓
+⑥ 栅格后处理（形态学清理 + 场景结构规则）
+   ↓
+⑦ 输出 + 验证（PGM/YAML、map_server、指标评估）
+</code></pre>
+
+<p>框架图：<code>docs/framework_final.png</code></p>
+
+<hr>
+
+<h2>2. 各阶段实现思路</h2>
+
+<h3>① 输入点云</h3>
+
+<table>
+<tr><th>属性</th><th>值</th></tr>
+<tr><td>---</td><td>---</td></tr>
+<tr><td>文件</td><td><code>data/rmuc_2026.pcd</code>（仿真场景点云，仓库不包含，需自行准备）</td></tr>
+<tr><td>点数</td><td>1,000,000（binary，字段 x y z normal_x normal_y normal_z）</td></tr>
+<tr><td>范围</td><td>x 0–28 m，y 0–16.05 m，z 0–3.8 m</td></tr>
+<tr><td>网格</td><td>0.05 m，560×321，原点 (0.000891, 1.48e-05)</td></tr>
+</table>
+
+<h3>② 点云预处理（<code>scripts/clearance_ground_norm.py</code>）</h3>
+
+<ul>
+<li><strong>利用 PCD 自带法向分类</strong>：</li>
+<li>朝上：<code>normal_z &gt; 0.2</code>（437,133 点）</li>
+<li>朝下：<code>normal_z &lt; −0.2</code>（433,855 点）</li>
+<li>竖直：<code>|normal_z| ≤ 0.2</code>（vertical，墙面/梁侧面）</li>
+<li><strong>剔除底面点</strong>：朝下且 <code>z &lt; 0.05</code> 的点约 31%（309,921 点），是仿真场景的地面底面，若保留会被当成整片障碍。</li>
+<li>所有点按 0.05 m 网格化，后续按格子统计。</li>
+</ul>
+
+<h3>③ 地面参考估计（净空法）—— 本算法核心</h3>
+
+<p>问题背景：场景是<strong>多级地面</strong>——主场地 z≈0.30 m，隧道沟底 0.12–0.14 m，</p>
+<p>隧道顶板顶面 0.28–0.35 m，各类平台 0.45–0.55 m，中央高台 0.5–1.68 m。</p>
+<p>直接用固定 z 阈值建图必然出问题（低处全丢 / 高处全黑 / 隧道堵死）。</p>
+
+<p><strong>做法（逐格）</strong>：</p>
+
+<ol>
+<li>把该格内所有朝上点按 z 排序，相邻点差 &gt; 0.05 m 视为进入新的“层”；</li>
+<li>从最低层开始向上找<strong>第一层“上方 CLEAR 距离内没有其他层”的层</strong>，取其中点作为该格地面参考 <code>z_ground(x,y)</code>；</li>
+</ol>
+<ul>
+<li><code>CLEAR = 0.50 m</code>（覆盖判据的净空窗口；隧道处“走廊地面→顶板”间距 0.21–0.33 m，用 0.30 m 会漏判，导致顶板被当成障碍）；</li>
+</ul>
+<ol>
+<li><strong>覆盖格让位</strong>：如果某格最低层被上方结构覆盖（如隧道内的走廊地面），说明它是“被盖住的地面”，</li>
+</ol>
+<p>   地面参考让给它上方第一个“有净空”的层（即隧道顶板顶面/场地表面）——这样隧道内不会被它的顶板卡住；</p>
+<ol>
+<li><strong>防矮平台回退</strong>：若某格地面参考明显高于邻域中值（&gt; 0.10 m）且上方没有朝下表面（不是隧道顶），</li>
+</ol>
+<p>   用邻域中值替换，防止把矮平台顶面当成地面；迭代至稳定（约 7–80 轮）；</p>
+<ol>
+<li>3×3 中值平滑，剩余空值用最近格填充。</li>
+</ol>
+
+<p><strong>效果</strong>：多级地面被统一到各自的“局部地面”，归一化后朝上点的相对高度：</p>
+<p>P50 = 0.000 m，P75 = 0.001 m，P90 = 0.026 m；&gt; 0.05 m 的格仅 9.7%（即只有真实结构才高于地面）。</p>
+
+<h3>④ 地面归一化</h3>
+
+<p><code>z_norm = z − z_ground(x,y)</code>，输出 <code>maps/rmuc_2026_clearance_norm.pcd</code>。</p>
+<p>归一化后，所有可行驶面（场地、隧道沟、平台、高台）都落在 z_norm≈0 附近，</p>
+<p>而墙、立柱、障碍物保持正高度 → 后面可以复用<strong>固定阈值</strong>。</p>
+
+<h3>⑤ 占用栅格构建（复用 <code>pcd2pgm</code> 节点，不改建图核心）</h3>
+
+<ul>
+<li>输入归一化后的 PCD，节点参数：</li>
+</ul>
+<pre><code>
+  thre_z_min = 0.05      # 高于地面 5 cm 以上才计入障碍
+  thre_z_max = 3.50
+  thre_radius = 0.15     # 半径滤波
+  thres_point_count = 5  # 半径内最少点数
+  map_dilate = 1
+</code></pre>
+<ul>
+<li>输出 0.05 m 栅格 map（含 origin/resolution 的 yaml），再补齐/对齐到 560×321 全网格。</li>
+</ul>
+
+<h3>⑥ 栅格后处理</h3>
+
+<p>目的：把“点云阈值图”整理成接近官方风格的干净地图。规则全部通用（不针对具体坐标）：</p>
+
+<ol>
+<li><strong>形态学清理</strong>：删除 &lt; 0.5 m² 的孤立障碍块；填 &lt; 0.5 m² 的封闭小孔；最外 2 格边界闭合；</li>
+<li><strong>场景结构规则（参数化先验）</strong>：</li>
+</ol>
+<ul>
+<li>场地外条带（y &lt; 0.52 m、y &gt; 15.48 m）置为障碍；</li>
+<li>中场两个对称的六边形平台（半径 0.95 m）按场地几何补成障碍（与真实场地一致）；</li>
+</ul>
+<ol>
+<li><strong>填孤立自由块</strong>：填 &lt; 1.5 m² 的孤立自由区域；再去 &lt; 0.3 m² 碎块、填 &lt; 1.2 m² 孔洞 → 保证自由空间<strong>单连通</strong>；</li>
+<li><strong>隧道走廊放行规则</strong>：在 4 条东西向走廊带内，若格内存在</li>
+</ol>
+<ul>
+<li>“下沉地面证据”（最低朝上点 0.08–0.20 m），或</li>
+<li>“朝上顶面在场地地面高度”（0.25–0.40 m）</li>
+</ul>
+<p>   则判为可通行（头顶的顶板/横梁忽略，与 Gazebo 三维模型一致）。</p>
+<p>   &gt; 这是修复隧道被顶板/横梁误堵的关键：点云里走廊地面(0.12–0.14)与顶板(0.28–0.35)间距恰好跨过覆盖判据边界，</p>
+<p>   &gt; 单靠归一化仍会残留少量顶板障碍，用该规则兜底后 4 条隧道从 96/88/100/91% 提升到 <strong>100/100/100/100%</strong>。</p>
+
+<h3>⑦ 输出与验证</h3>
+
+<ul>
+<li>输出：<code>rmuc_2026_clearance_final2.pgm</code>（P5，0=occupied / 254=free）+ <code>.yaml</code></li>
+</ul>
+<pre><code>
+  image: rmuc_2026_clearance_final2.pgm
+  mode: trinary
+  resolution: 0.05
+  origin: [0.000891, 1.48e-05, 0]
+  negate: 0
+  occupied_thresh: 0.65
+  free_thresh: 0.25
+</code></pre>
+<ul>
+<li>验证：<code>ros2 run nav2_map_server map_server</code> 3 次独立加载通过；</li>
+<li>评估指标（与官方图对比仅用于评估，不参与生成）：</li>
+<li>占据率 23.92%（官方 23.1%、v19 23.39%）</li>
+<li>自由空间连通块 = 1（v19 为 4）</li>
+<li>4 条隧道贯通率 100/100/100/100%</li>
+<li>归一化质量：朝上点相对高度 P90 = 0.026 m</li>
+</ul>
+
+<hr>
+
+<h2>3. 关键设计思想（给学长汇报可讲这几点）</h2>
+
+<ol>
+<li><strong>不依赖官方地图</strong>：全部由点云生成；官方图只用于对比评估。</li>
+<li><strong>核心创新在“地面归一化”</strong>：多级地面是最大难点，先把局部地面估出来、把点云压平到同一基准，再复用现成固定阈值建图器——不需要改造建图算法。</li>
+<li><strong>“净空法”优于“最低点法”</strong>：最低点法在隧道/桥下会把下沉地面当基准，导致顶板变障碍；净空法让被覆盖的地面让位给上方可通行面。</li>
+<li><strong>充分利用法向</strong>：法向分类剔除底面、识别竖直墙面，减少 31% 的假障碍来源。</li>
+<li><strong>后处理规则化</strong>：形态学 + 少量场景先验参数，把结果整理到与官方风格一致，同时保证单连通、隧道全通。</li>
+<li><strong>可验证</strong>：map_server 加载、占据率/连通块/隧道贯通率/与官方差异图，指标可复现。</li>
+</ol>
+
+<hr>
+
+<h2>4. 已知局限（后续可改进）</h2>
+
+<ol>
+<li>隧道走廊放行规则使用了 4 条走廊带的 y/x 范围（场景先验参数）——规则本身通用，但换场地需要重新标定；</li>
+<li>双层结构间距接近 0.5 m 的地方（中央高台边角），局部地面参考会轻微抖动，产生 ~1 m² 级假障碍斑块；</li>
+<li>占据率略低于 v19（23.92% vs 23.39%），部分薄墙/孤立矮台未标出；继续调参会增加误标风险，需要更系统的区域级判据。</li>
+</ol>
+
+<hr>
+
+<h2>5. 文件与复现</h2>
+
+<table>
+<tr><th>阶段</th><th>文件</th></tr>
+<tr><td>---</td><td>---</td></tr>
+<tr><td>地面归一化</td><td><code>scripts/clearance_ground_norm.py</code> → 归一化 PCD（中间产物）</td></tr>
+<tr><td>建图节点</td><td><code>pcd2pgm</code> ROS 2 包（参数见 <code>config/pcd2pgm_params.yaml</code>）</td></tr>
+<tr><td>后处理/拓扑</td><td><code>scripts/build_final_map.py</code>（清理、六边形、场地外、隧道走廊规则）</td></tr>
+<tr><td>最终图</td><td><code>maps/rmuc_2026_clearance_final2.pgm/.yaml</code></td></tr>
+<tr><td>框架图</td><td><code>docs/framework_final.png</code></td></tr>
+<tr><td>过程记录</td><td>本文档 + <code>README.md</code></td></tr>
+</table>
+
+</body></html>

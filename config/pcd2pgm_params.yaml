@@ -1,0 +1,20 @@
+# Parameters used when building the occupancy grid from the normalized cloud.
+# Feed this file to the pcd2pgm node together with --pcd-file of your normalized PCD.
+pcd2pgm:
+  ros__parameters:
+    pcd_file: data/rmuc_2026.pcd          # override on the command line
+    odom_to_lidar_odom: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    flag_pass_through: false
+    map_resolution: 0.05
+    map_topic_name: map
+
+    # fixed thresholds applied to the *normalized* height z_norm = z - z_ground
+    thre_z_min: 0.05
+    thre_z_max: 3.50
+    thre_radius: 0.15
+    thres_point_count: 5
+
+    # plain height-threshold mode: normalization is done during pre-processing
+    flag_surface_filter: false
+    flag_use_normals: false
+    map_dilate: 1
